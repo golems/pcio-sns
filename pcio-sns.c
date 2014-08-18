@@ -62,6 +62,8 @@
 #include <somatic/util.h>
 #include <somatic.pb-c.h>
 
+#include <sns.h>
+
 #include "pcio.h"
 #include "pciod.h"
 
@@ -169,14 +171,14 @@ static int parse_opt(int key, char *arg, struct argp_state *state) {
 			mod->id = parseu();
 			mod->next = opt_bus->mod;
 			opt_bus->mod = mod;
-			somatic_verbprintf(2, "Arg mod: %d on bus %d\n", mod->id, opt_bus->net);
+			SNS_LOG(LOG_INFO, "Arg mod: %d on bus %d\n", mod->id, opt_bus->net);
 		} break;
 
 		// Parse the bus number
 		case 'b': {
 			pciod_arg_bus_t *bus = AA_NEW0( pciod_arg_bus_t );
 			bus->net = parseu();
-			somatic_verbprintf(2, "Arg bus: %d\n", bus->net);
+			SNS_LOG(LOG_INFO, "Arg bus: %d\n", bus->net);
 			bus->next = opt_bus;
 			opt_bus = bus;
 		}	break;
@@ -189,7 +191,7 @@ static int parse_opt(int key, char *arg, struct argp_state *state) {
 					(strcasecmp( opt_query, "state" ) != 0)) {
 				r = pcio_code_lookup( pcio_param_codes, arg, &opt_param, &opt_param_type );
 				somatic_hard_assert( 0 == r, "Unknown Parameter: %s\n", opt_query);
-				somatic_verbprintf(1, "param: 0x%x, type %d\n", opt_param, opt_param_type );
+				SNS_LOG(LOG_INFO, "param: 0x%x, type %d\n", opt_param, opt_param_type );
 			}
 		}	break;
 
@@ -220,11 +222,11 @@ static int parse_opt(int key, char *arg, struct argp_state *state) {
 			somatic_hard_assert( NULL != opt_set, "value only valid for -S\n");
 			if(AA_TYPE_DOUBLE == opt_param_type) {								
 				opt_bus->mod->d = parsef();
-				somatic_verbprintf(2, "param %d.%d: %f\n", opt_bus->net, opt_bus->mod->id, opt_bus->mod->d);
+				SNS_LOG(LOG_INFO, "param %d.%d: %f\n", opt_bus->net, opt_bus->mod->id, opt_bus->mod->d);
 			} 
 			else if (AA_TYPE_UINT32 == opt_param_type) {
 				opt_bus->mod->u32 = parseu();
-				somatic_verbprintf(2,"param %d.%d: %u\n",opt_bus->net, opt_bus->mod->id, opt_bus->mod->u32);
+				SNS_LOG(LOG_INFO, "param %d.%d: %u\n",opt_bus->net, opt_bus->mod->id, opt_bus->mod->u32);
 			} 
 			else somatic_hard_assert( 0, "Unknown type: %d\n", opt_param_type );
 		} break;
@@ -322,7 +324,7 @@ static void init( pciod_t *cx ) {
 	opt_period_sec = 1.0 / opt_frequency;
 
 	// Set the current mode
-	somatic_verbprintf(1, "Full Current: %s\n", opt_full_cur ? "yes" : "no" );
+	SNS_LOG(LOG_INFO, "Full Current: %s\n", opt_full_cur ? "yes" : "no" );
 	int r = pcio_group_set_fullcur(&cx->group, opt_full_cur);
 	aa_hard_assert(r == NTCAN_SUCCESS, "Failed to set full current\n");
 }
@@ -389,7 +391,7 @@ static void destroy( pciod_t *cx) {
 static void query( pciod_t *cx) {
 
 	// Dump the config or the state based on the query type
-	somatic_verbprintf(1, "Querying:\n");
+	SNS_LOG(LOG_INFO, "Querying:\n");
 	if( 0 == strcasecmp("config", opt_query) ){
 		pcio_group_dump_config( &cx->group );
 		return;
@@ -410,7 +412,7 @@ static void query( pciod_t *cx) {
 	} else if( AA_TYPE_UINT32 == opt_param_type ) {
 		pcio_group_getu32( g, (int)opt_param, Xu32, n);
 	} else {
-		somatic_verbprintf(0, "ERROR: Unknown type: %d\n", opt_param_type);
+		SNS_LOG(LOG_INFO, "ERROR: Unknown type: %d\n", opt_param_type);
 		exit(EXIT_FAILURE);
 	}
 
@@ -449,10 +451,10 @@ static void set( pciod_t *cx) {
 			assert(k < n);
 			if(AA_TYPE_DOUBLE == opt_param_type) {
 				Xd[k] = mod->d;
-				somatic_verbprintf(1, "param %d: %f\n", k, Xd[k]);
+				SNS_LOG(LOG_INFO, "param %d: %f\n", k, Xd[k]);
 			} else if(AA_TYPE_UINT32 == opt_param_type) {
 				Xu32[k] = mod->u32;
-				somatic_verbprintf(1, "param %d: %u\n", k, Xu32[k]);
+				SNS_LOG(LOG_INFO, "param %d: %u\n", k, Xu32[k]);
 			} else assert(0);
 			k--;
 		}
@@ -492,7 +494,7 @@ static void set_config( pciod_t *cx) {
 
 			// Sanity check and print for debugging
 			assert( k < n );
-			somatic_verbprintf(1, "Initial config bus %d id %d: 0x%x\n",
+			SNS_LOG(LOG_INFO, "Initial config bus %d id %d: 0x%x\n",
 							   g->bus[i].net, g->bus[i].module[j].id, config[k]);
 
 			// Set the config; either enable/disable
@@ -548,31 +550,30 @@ int main(int argc, char *argv[]) {
 
 	// Parse the arguments
 	argp_parse(&argp, argc, argv, 0, NULL, &cx);
-	somatic_verbprintf_prefix = cx.d_opts.ident;
 
 	// ========================================================================
 	// If any short actions requested, carry them out
 
 	// Output the results of the query
 	if (opt_query ) {
-		somatic_verbprintf(1, "Querying %s\n", opt_query);
+		SNS_LOG(LOG_INFO, "Querying %s\n", opt_query);
 		init_group(&cx);
 		query(&cx);
 	}
 
 	// Set the requested value
 	else if (opt_set) {
-		somatic_verbprintf(1, "Setting %s\n", opt_set);
+		SNS_LOG(LOG_INFO, "Setting %s\n", opt_set);
 		init_group(&cx);
 		set(&cx);
 	}
 
 	// Reset all the modules
 	else if (opt_reset) {
-		somatic_verbprintf(1, "Resetting modules\n");
+		SNS_LOG(LOG_INFO, "Resetting modules\n");
 		init_group(&cx);
 		int r = pcio_group_reset(&cx.group);
-		somatic_verbprintf((0 == r) ? 1 : 0, "Resetting status: %s (%d)\n",
+		SNS_LOG(LOG_INFO, "Resetting status: %s (%d)\n",
 						   canResultString(r), r);
 
 	// List the state, config and parameter values
@@ -587,7 +588,7 @@ int main(int argc, char *argv[]) {
 
 	// Enable or disable the configuration
 	else if (opt_config_enable || opt_config_disable) {
-		somatic_verbprintf(1, "Setting configuration\n");
+		SNS_LOG(LOG_INFO, "Setting configuration\n");
 		init_group(&cx);
 		set_config(&cx);
 	}
@@ -601,9 +602,9 @@ int main(int argc, char *argv[]) {
 		init(&cx);
 
 		// Print the frequency, state and command channels
-		somatic_verbprintf(1, "frequency: %f\n", opt_frequency);
-		somatic_verbprintf(1, "state chan: %s\n", opt_state_chan);
-		somatic_verbprintf(1, "cmd chan: %s\n", opt_cmd_chan);
+		SNS_LOG(LOG_INFO, "frequency: %f\n", opt_frequency);
+		SNS_LOG(LOG_INFO, "state chan: %s\n", opt_state_chan);
+		SNS_LOG(LOG_INFO, "cmd chan: %s\n", opt_cmd_chan);
 
 		// Continuously update to get command message and output state 
 		run(&cx);
@@ -644,13 +645,13 @@ int build_pcio_group(pcio_group_t *g) {
 
 		// Set the network address of the bus in the group and print if requested
 		g->bus[i].net = (int)bus->net;
-		somatic_verbprintf(2, "Filling bus %d, net %d\n", i, g->bus[i].net);
+		SNS_LOG(LOG_INFO, "Filling bus %d, net %d\n", i, g->bus[i].net);
 
 		// Set the bus ids of the modules (in this bus) in the group
 		size_t j = g->bus[i].module_cnt - 1;
 		for( pciod_arg_mod_t *mod = bus->mod; NULL != mod; mod=mod->next ) {
 			g->bus[i].module[j].id = (int)mod->id;
-			somatic_verbprintf(2, "Filling module %d, id %d\n", j, g->bus[i].module[j].id);
+			SNS_LOG(LOG_INFO, "Filling module %d, id %d\n", j, g->bus[i].module[j].id);
 			j--;
 		}
 		i--;

@@ -59,7 +59,7 @@
 #include <ntcanopen.h>
 #include <sched.h>
 #include <unistd.h>
-#include <somatic/util.h>
+// #include <somatic/util.h>
 #include "pcio.h"
 
 
@@ -243,6 +243,23 @@ static const config_msg_t configs[] = {
 */
 
 
+/*--------------------------------------------------*/
+/* helper functions for single-double float changes */
+/*--------------------------------------------------*/
+
+/// convert double floats to single floats
+static void pcio_d2s( float *dst, const double *src, size_t cnt ) {
+    for( size_t i = 0; i < cnt; i++ )
+        dst[i] = (float) src[i];
+}
+
+
+/// convert single floats to double floats
+static void pcio_s2d( double *dst, const float *src, size_t cnt ) {
+    for( size_t i = 0; i < cnt; i++ )
+        dst[i] = (double) src[i];
+}
+
 /*------------------*/
 /* Group Management */
 /*------------------*/
@@ -256,9 +273,9 @@ int pcio_group_dump_config( pcio_group_t *g ) {
     size_t k = 0;
     for(size_t i = 0; i < g->bus_cnt; i++) {
         for(size_t j = 0; j < g->bus[i].module_cnt; j++) {
-            somatic_verbprintf(0, "Config bus %d, id %d (%d): 0x%x\n",
-                               g->bus[i].net, g->bus[i].module[j].id,
-                               k, config[k]);
+            // somatic_verbprintf(0, "Config bus %d, id %d (%d): 0x%x\n",
+            //                    g->bus[i].net, g->bus[i].module[j].id,
+            //                    k, config[k]);
             pcio_resolve_module_config_word(0, config[k]);
             k++;
         }
@@ -326,8 +343,8 @@ int pcio_group_init( pcio_group_t *g ) {
             for( size_t i = 0; i < g->bus_cnt; i++ ) {
                 for( size_t j = 0; j < g->bus[i].module_cnt; j++ ) {
                     assert( k < n );
-                    somatic_verbprintf(1, "STATE OF BUS %d ID %d:  0x%x\n",
-                                       g->bus[i].net, g->bus[i].module[j].id, error[k] );
+                    // somatic_verbprintf(1, "STATE OF BUS %d ID %d:  0x%x\n",
+                    //                    g->bus[i].net, g->bus[i].module[j].id, error[k] );
                     pcio_resolve_module_state_word(2, error[k]);
 /*
                     // check to make sure we get home_oks
@@ -399,8 +416,8 @@ int pcio_group_set_fullcur( pcio_group_t *g, int enable ) {
         for( size_t i = 0; i < g->bus_cnt; i++ ) {
             for( size_t j = 0; j < g->bus[i].module_cnt; j++ ) {
                 assert( k < n );
-                somatic_verbprintf(1, "CONFIG OF BUS %d ID %d: 0x%x\n",
-                                   g->bus[i].net, g->bus[i].module[j].id, config[k]);
+                // somatic_verbprintf(1, "CONFIG OF BUS %d ID %d: 0x%x\n",
+                //                    g->bus[i].net, g->bus[i].module[j].id, config[k]);
                 pcio_resolve_module_config_word(2, config[k]);
                 if( 1 == enable ) {
                     // release current limit, clear undocumented flags
@@ -635,7 +652,7 @@ int pcio_group_do( pcio_group_t *g, int id_mask,
 
 int pcio_group_cmd_ack( pcio_group_t *g, double *ack, size_t cnt,
                         int motion_id, const double *cmd ) {
-    somatic_verbprintf(2, "pcio_group_cmd_ack(0x%x)\n", motion_id);
+    //somatic_verbprintf(2, "pcio_group_cmd_ack(0x%x)\n", motion_id);
     assert( PCIO_FVEL_ACK == motion_id || /* velocity command */
             PCIO_FCUR_ACK == motion_id || /* current command */
             PCIO_FRAMP == motion_id); /* position command */
@@ -648,7 +665,7 @@ int pcio_group_cmd_ack( pcio_group_t *g, double *ack, size_t cnt,
     memset(state,0,sizeof(state));
     memset(tx,0,sizeof(tx));
     memset(rx,0,sizeof(rx));
-    somatic_d2s( tx, cmd, cnt );
+    pcio_d2s( tx, cmd, cnt );
 
     for( size_t i = 0; i < g->bus_cnt; i ++ ) { // loop through buses
         for( size_t j = 0; j < g->bus[i].module_cnt; j++) { // count through modules
@@ -696,11 +713,11 @@ int pcio_group_cmd_ack( pcio_group_t *g, double *ack, size_t cnt,
     }
 
     if( ack ) {
-        somatic_s2d( ack, rx, cnt );
+        pcio_s2d( ack, rx, cnt );
         pcio_group_set_last_position( g, ack, cnt );
     } else {
         double pos[cnt];
-        somatic_s2d( pos, rx, cnt );
+        pcio_s2d( pos, rx, cnt );
         pcio_group_set_last_position( g, pos, cnt );
     }
     return r;
@@ -715,7 +732,7 @@ int pcio_group_dump_error (pcio_group_t *g ) {
     for( size_t i = 0; i < g->bus_cnt; i++ ) {
         for( size_t j = 0; j < g->bus[i].module_cnt; j++ ) {
             assert( k < n );
-            somatic_verbprintf(1, "STATE OF BUS %d ID %d:  0x%x\n",
+            printf("STATE OF BUS %d ID %d:  0x%x\n",
                                g->bus[i].net, g->bus[i].module[j].id, error[k] );
             pcio_resolve_module_state_word(0, error[k]);
             // check for power fault
@@ -746,7 +763,7 @@ int pcio_group_get( pcio_group_t *g, int parm_id,
 int pcio_group_setd( pcio_group_t *g, int parm_id,
                      const double *vals, size_t n_vals ) {
     float svals[n_vals];
-    somatic_d2s( svals, vals, n_vals );
+    pcio_d2s( svals, vals, n_vals );
     uint8_t ret[n_vals];
     //FIXME: should check status in ret
     return  pcio_group_do( g, PCIO_IDMASK_CMDPUT,
@@ -783,7 +800,7 @@ int pcio_group_getd( pcio_group_t *g, int parm_id,
                      double *vals, size_t n_vals ) {
     float svals[n_vals];
     int r = pcio_group_get( g, parm_id, svals, 32, n_vals );
-    somatic_s2d( vals, svals, n_vals );
+    pcio_s2d( vals, svals, n_vals );
     if( (NTCAN_SUCCESS == r) && (PCIO_ACT_FPOS == parm_id) ) {
         pcio_group_set_last_position( g, vals, n_vals );
     }
@@ -811,7 +828,7 @@ int pcio_group_getu32( pcio_group_t *g, int parm_id,
 /*-------------------*/
 
 int pcio_group_reset( pcio_group_t *g ) {
-    somatic_verbprintf(2, "pcio_group_reset()\n");
+    // somatic_verbprintf(2, "pcio_group_reset()\n");
     for( size_t i = 0; i < g->bus_cnt; i ++ ) { // loop through buses
         for( size_t j = 0; j < g->bus[i].module_cnt; j++ ) { // count through modules
             g->bus[i].module[j].state = 0;
@@ -853,13 +870,13 @@ int pcio_group_at_home( pcio_group_t *g ) {
     double newhome[n];
 
     void dump(const char *s, double *x) {
-        if( somatic_opt_verbosity >= 1 ) {
-            fprintf(stderr, "%s: [ ", s);
-            for( size_t i = 0; i < n; i ++ ) {
-                fprintf(stderr, "%.2lf  ", x[i]*180.0/M_PI );
-            }
-            fprintf(stderr, "]\n");
-        }
+        //if( somatic_opt_verbosity >= 1 ) {
+        //    fprintf(stderr, "%s: [ ", s);
+        //    for( size_t i = 0; i < n; i ++ ) {
+        //        fprintf(stderr, "%.2lf  ", x[i]*180.0/M_PI );
+        //    }
+        //    fprintf(stderr, "]\n");
+        //}
     }
 
     // get old state
@@ -906,13 +923,13 @@ int pcio_group_at_pos( pcio_group_t *g, const double *pos ) {
     double newhome[n];
 
     void dump(const char *s, double *x) {
-        if( somatic_opt_verbosity >= 1 ) {
-            fprintf(stderr, "%s: [ ", s);
-            for( size_t i = 0; i < n; i ++ ) {
-                fprintf(stderr, "%.2lf  ", x[i]*180.0/M_PI );
-            }
-            fprintf(stderr, "]\n");
-        }
+        //if( somatic_opt_verbosity >= 1 ) {
+        //    fprintf(stderr, "%s: [ ", s);
+        //    for( size_t i = 0; i < n; i ++ ) {
+        //        fprintf(stderr, "%.2lf  ", x[i]*180.0/M_PI );
+        //    }
+        //    fprintf(stderr, "]\n");
+        //}
     }
 
     // get old state
@@ -1118,7 +1135,7 @@ int pcio_group_setpos( pcio_group_t *g,
     {
         float tx[n_pos];
         uint8_t rx[n_pos];
-        somatic_d2s( tx, pos, n_pos );
+        pcio_d2s( tx, pos, n_pos );
         int r = pcio_group_do( g, PCIO_IDMASK_CMDPUT,
                                PCIO_SET_MOTION, PCIO_FRAMP,
                                tx, 32, n_pos,
@@ -1156,7 +1173,7 @@ int pcio_group_setpos_ack( pcio_group_t *g,
     {
         float tx[n_pos];
         float rx[n_pos];
-        somatic_d2s( tx, pos, n_pos );
+        pcio_d2s( tx, pos, n_pos );
         int r = pcio_group_do( g, PCIO_IDMASK_CMDPUT,
                                PCIO_SET_MOTION, PCIO_FRAMP,
                                tx, 32, n_pos,
@@ -1166,7 +1183,7 @@ int pcio_group_setpos_ack( pcio_group_t *g,
             return r;
 
         if( ack )
-            somatic_s2d( ack, rx, n_pos );
+            pcio_s2d( ack, rx, n_pos );
     }
 
     return NTCAN_SUCCESS ;
@@ -1193,7 +1210,7 @@ void pcio_resolve_module_state_word(int level, uint32_t msg) {
     size_t i;
     for ( i = 0; i < sizeof(states) / sizeof(state_msg_t); i++) {
         if ((msg & states[i].value) == states[i].value) {
-            somatic_verbprintf(level, "  %s: %s (0x%x)\n",
+            printf("  %s: %s (0x%x)\n",
                                states[i].type, states[i].flag, states[i].value);
         }
     }
@@ -1215,8 +1232,8 @@ void pcio_resolve_module_config_word(int level, uint32_t msg) {
     size_t i;
     for ( i = 0; i < sizeof(configs) / sizeof(config_msg_t); i++) {
         if ((msg & configs[i].value) == configs[i].value) {
-            somatic_verbprintf(level, "  %s (0x%x)\n",
-                               configs[i].flag, configs[i].value);
+            //somatic_verbprintf(level, "  %s (0x%x)\n",
+            //                   configs[i].flag, configs[i].value);
         }
     }
 }

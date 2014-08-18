@@ -16,12 +16,14 @@ set(CMAKE_C_FLAGS --std=gnu99)
 # Link to somatic, amino and ach
 # NOTE: Ideally we would like to 'find' these packages but for now, we assume they are either 
 # in /usr/lib or /usr/local/lib
-link_libraries(ach somatic ntcan ntcanopen amino)
+link_libraries(ach sns ntcan ntcanopen amino)
 
 # Add the executables
 include_directories(include)
 add_executable(pciod pciod.c pcio.c code.c)
+add_executable(pcio-sns pcio-sns.c pcio.c code.c)
 add_executable(pcio_util pcio_util.c pcio.c code.c)
+add_executable(query tests/query.c pcio.c code.c)
 
 # Install it
 install(TARGETS pciod pcio_util DESTINATION /usr/local/bin)
