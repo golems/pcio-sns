@@ -52,15 +52,10 @@
 #include <stdarg.h>
 #include <stdint.h>
 
-#include <somatic.h>
-#include <somatic/daemon.h>
 #include <amino.h>
 #include <ntcan.h>
 #include <ntcanopen.h>
 #include <ach.h>
-
-#include <somatic/util.h>
-#include <somatic.pb-c.h>
 
 #include <sns.h>
 
@@ -87,6 +82,28 @@ typedef struct pciod_arg_bus {
 	struct pciod_arg_bus *next;
 	pciod_arg_mod_t *mod;
 } pciod_arg_bus_t;
+
+/* ******************************************************************************************** */
+/// Default command channel name
+#define PCIOD_CMD_CHANNEL_NAME "pciod-cmd"
+
+/// Default state channel name
+#define PCIOD_STATE_CHANNEL_NAME "pciod-state"
+
+typedef struct {
+    somatic_d_t d;
+    somatic_d_opts_t d_opts;
+    size_t n; // module count
+    ach_channel_t cmd_chan;
+    ach_channel_t state_chan;
+    pcio_group_t group;
+    Somatic__MotorState state_msg;
+    struct {
+        Somatic__Vector position;
+        Somatic__Vector velocity;
+        Somatic__Vector current;
+    } state_msg_fields;
+} pciod_t;
 
 /* ******************************************************************************************** */
 // The input variables
@@ -185,41 +202,41 @@ static int parse_opt(int key, char *arg, struct argp_state *state) {
 
 		// Set the requested parameter value if it is not config or state (?)
 		case 'Q': {
-			somatic_hard_assert( NULL == opt_set, "Can't query and set\n");
+			SNS_REQUIRE( NULL == opt_set, "Can't query and set\n");
 			opt_query = strdup(arg);
 			if((strcasecmp(opt_query, "config" ) != 0) && 
 					(strcasecmp( opt_query, "state" ) != 0)) {
 				r = pcio_code_lookup( pcio_param_codes, arg, &opt_param, &opt_param_type );
-				somatic_hard_assert( 0 == r, "Unknown Parameter: %s\n", opt_query);
+				SNS_REQUIRE( 0 == r, "Unknown Parameter: %s\n", opt_query);
 				SNS_LOG(LOG_INFO, "param: 0x%x, type %d\n", opt_param, opt_param_type );
 			}
 		}	break;
 
 		// Get the parameter that the user wants to set 
 		case 'S': {
-			somatic_hard_assert( NULL == opt_query, "Can't query and set\n");
+			SNS_REQUIRE( NULL == opt_query, "Can't query and set\n");
 			opt_set = strdup(arg);
 			r = pcio_code_lookup( pcio_param_codes, arg, &opt_param, &opt_param_type );
-			somatic_hard_assert( 0 == r, "Unknown Parameter: %s\n", opt_set);
+			SNS_REQUIRE( 0 == r, "Unknown Parameter: %s\n", opt_set);
 		}	break;
 
 		// Set the given config id true
 		case '1': {
 			opt_config_enable = strdup(arg);
 			r = pcio_code_lookup( pcio_config_codes, arg, &opt_flag, NULL );
-			somatic_hard_assert( 0 == r, "Unknown configid: %s\n", arg);
+			SNS_REQUIRE( 0 == r, "Unknown configid: %s\n", arg);
 		} break;
 
 		// Set the given config id false
 		case '0': {
 			opt_config_disable = strdup(arg);
 			r = pcio_code_lookup( pcio_config_codes, arg, &opt_flag, NULL );
-			somatic_hard_assert( 0 == r, "Unknown configid: %s\n", arg);
+			SNS_REQUIRE( 0 == r, "Unknown configid: %s\n", arg);
 		} break;
 
 		// Get the value for the given specified parameter before with 'S' and check its type
 		case 'x':	{
-			somatic_hard_assert( NULL != opt_set, "value only valid for -S\n");
+			SNS_REQUIRE( NULL != opt_set, "value only valid for -S\n");
 			if(AA_TYPE_DOUBLE == opt_param_type) {								
 				opt_bus->mod->d = parsef();
 				SNS_LOG(LOG_INFO, "param %d.%d: %f\n", opt_bus->net, opt_bus->mod->id, opt_bus->mod->d);
@@ -228,7 +245,7 @@ static int parse_opt(int key, char *arg, struct argp_state *state) {
 				opt_bus->mod->u32 = parseu();
 				SNS_LOG(LOG_INFO, "param %d.%d: %u\n",opt_bus->net, opt_bus->mod->id, opt_bus->mod->u32);
 			} 
-			else somatic_hard_assert( 0, "Unknown type: %d\n", opt_param_type );
+			else SNS_REQUIRE( 0, "Unknown type: %d\n", opt_param_type );
 		} break;
 
 		// Set the rest of the flags to true or increment them
@@ -237,7 +254,7 @@ static int parse_opt(int key, char *arg, struct argp_state *state) {
 		case 'R': opt_reset = 1; break;
 		case 'L': opt_list = 1; break;
 		case 'H': opt_home = 1; break;
-		case 'v': somatic_opt_verbosity++; break;
+		case 'v': sns.verbosity ++; break;
 		case 'f': opt_frequency = parsef(); break;
 		case ARG_KEY_DISABLE_FULL_CUR: opt_full_cur = 0; break;
 		case ARG_KEY_ENABLE_FULL_CUR: opt_full_cur = 1; break;
@@ -245,7 +262,7 @@ static int parse_opt(int key, char *arg, struct argp_state *state) {
 			break;
 	}
 
-	somatic_d_argp_parse(key, arg, &cx->d_opts);
+	// somatic_d_argp_parse(key, arg, &cx->d_opts);
 	return 0;
 }
 
@@ -303,16 +320,15 @@ void setupMessage (pciod_t* cx) {
 static void init( pciod_t *cx ) {
 
 	// Initialize the daemon
-	somatic_d_init(&cx->d, &cx->d_opts);
+	sns.init();
 
 	// Initialize the group and home it if necessary
 	init_group(cx);
 	if (opt_home) pcio_group_home(&cx->group);
 
 	/// Initialize the state and command ach channels 
-	somatic_d_channel_open( &cx->d, &cx->cmd_chan, opt_cmd_chan, NULL );
-	somatic_d_channel_open( &cx->d, &cx->state_chan, opt_state_chan, NULL );
-	ach_flush(&cx->cmd_chan);
+	sns_open_chan (&cx->cmd_chan, opt_cmd_chan, NULL);
+	sns_open_chan (&cx->state_chan, opt_state_chan, NULL);
 
 	// Get the group size
 	cx->n = pcio_group_size(&cx->group);
@@ -344,10 +360,8 @@ static void update( pciod_t *cx ) {
 		ACH_O_WAIT | ACH_O_LAST); 
 
 	// Check message reception
-	somatic_d_check(&cx->d, SOMATIC__EVENT__PRIORITIES__CRIT,
-	 SOMATIC__EVENT__CODES__COMM_FAILED_TRANSPORT,
-	 (((ACH_OK == r || ACH_MISSED_FRAME == r) && cmd) || (ACH_TIMEOUT == r)), "pciod-update",
-   "ach result: %s", ach_result_to_string(r));
+	bool good = (((ACH_OK == r || ACH_MISSED_FRAME == r) && cmd) || (ACH_TIMEOUT == r));
+	SNS_CHECK(good, LOG_WARNING, "pciod-update: ach result: %s", canResultString(r));
 
 	// If the message has timed out, request an update
 	if (r == ACH_TIMEOUT) update_state(cx, NULL);
@@ -368,10 +382,8 @@ static void update( pciod_t *cx ) {
 				SOMATIC__MOTOR_PARAM__MOTOR_RESET == cmd->param);
 
 		// Use somatic interface to combine the finalize the checks in case there is an error
-		int somGoodParam = somatic_d_check_msg(&cx->d, goodParam, "motor_cmd", 
-			"invalid motor param, set: %d, val: %d", cmd->has_param, cmd->param);
-		int somGoodValues = somatic_d_check_msg(&cx->d, goodValues, "motor_cmd", 
-			"wrong motor count: %d, wanted %d", cmd->values->n_data, cx->n);
+		int somGoodParam = SNS_REQUIRE(goodParam, "invalid motor param, set: %d, val: %d", cmd->has_param, cmd->param);
+		int somGoodValues = SNS_REQUIRE(goodValues, "wrong motor count: %d, wanted %d", cmd->values->n_data, cx->n);
 
 		// If both good parameter and values, execute the command; otherwise just update the state
 		if(somGoodParam && somGoodValues) execute_and_update_state(cx, cmd);
@@ -384,7 +396,7 @@ static void destroy( pciod_t *cx) {
 	pcio_group_destroy(&cx->group); 
 	ach_close(&cx->cmd_chan);
 	ach_close(&cx->state_chan);
-	somatic_d_destroy(&cx->d);
+	sns_end();
 }
 
 /* ******************************************************************************************** */
@@ -466,7 +478,7 @@ static void set( pciod_t *cx) {
 	else assert(0);
 
 	// If in verbose mode, query it to show that the set action was successful
-	if( somatic_opt_verbosity ) {
+	if( sns.verbosity ) {
 		opt_query = opt_set;
 		query(cx);
 	}
@@ -521,18 +533,16 @@ static void set_config( pciod_t *cx) {
 static void run( pciod_t *cx) {
 
 	// Send a "running" notice on the event channel
-	somatic_d_event( &cx->d, SOMATIC__EVENT__PRIORITIES__NOTICE, SOMATIC__EVENT__CODES__PROC_RUNNING,
-		NULL, NULL);
+	sns.start();
 
 	// Keep updating
-	while (!somatic_sig_received) {
+	while (!sns_cx.shutdown) {
 		update(cx);
 		aa_mem_region_release( &cx->d.memreg );
 	}
 
 	// Send a "stopping" notice on the event channel
-	somatic_d_event( &cx->d, SOMATIC__EVENT__PRIORITIES__NOTICE, SOMATIC__EVENT__CODES__PROC_STOPPING,
-		NULL, NULL);
+	sns.stop();
 }
 
 /* ******************************************************************************************** */
@@ -675,7 +685,7 @@ int execute_and_update_state(pciod_t *cx, Somatic__MotorCmd *msg ) {
 		// Set the current values
 		case SOMATIC__MOTOR_PARAM__MOTOR_CURRENT: {
 			r = pcio_group_cmd_ack(g, ack_vals, msg->values->n_data, PCIO_FCUR_ACK, msg->values->data);
-			if(somatic_opt_verbosity >= 3) fprintf(stdout, "Setting motor currents: [");
+			if(sns.verbosity >= 3) fprintf(stdout, "Setting motor currents: [");
 			got_ack = 1;
 		} break;
 
@@ -684,7 +694,7 @@ int execute_and_update_state(pciod_t *cx, Somatic__MotorCmd *msg ) {
 			pcio_group_limit_velocity(g, msg->values->data, msg->values->n_data, opt_period_sec);
 			r = pcio_group_cmd_ack(g, ack_vals, msg->values->n_data, PCIO_FVEL_ACK, msg->values->data);
 			got_ack = 1;
-			if (somatic_opt_verbosity >= 3) fprintf(stdout, "Setting motor velocities: [");
+			if (sns.verbosity >= 3) fprintf(stdout, "Setting motor velocities: [");
 		} break;
 
 		// Set the motor positions after limiting them
@@ -692,39 +702,38 @@ int execute_and_update_state(pciod_t *cx, Somatic__MotorCmd *msg ) {
 			pcio_group_limit_position( g, msg->values->data, msg->values->n_data );
 			r = pcio_group_setpos_ack( g, msg->values->data, msg->values->n_data, 0.5, 4.0, ack_vals);
 			got_ack = 1;
-			if (somatic_opt_verbosity >= 3) fprintf(stdout, "Setting motor positions: [");
+			if (sns.verbosity >= 3) fprintf(stdout, "Setting motor positions: [");
 		} break;
 
 		// Send a halt message
 		case SOMATIC__MOTOR_PARAM__MOTOR_HALT: {
 			r = pcio_group_halt(g);
-			if (somatic_opt_verbosity >= 3) fprintf(stdout, "Halting motor: [");
+			if (sns.verbosity >= 3) fprintf(stdout, "Halting motor: [");
 		} break;
 
 		// Send a reset message
 		case SOMATIC__MOTOR_PARAM__MOTOR_RESET: {
 			r = pcio_group_reset(g);
-			if (somatic_opt_verbosity >= 3) fprintf(stdout, "Resetting motor: [");
+			if (sns.verbosity >= 3) fprintf(stdout, "Resetting motor: [");
 		} break;
 
 		// Should not reach here - if does, set success to attempt to continue
 		default: {
-			somatic_d_assert_err( &cx->d, 0, "invalid param: %d", msg->param);
-			if (somatic_opt_verbosity >= 3) fprintf(stdout, "default: [");
+			SNS_REQUIRE(false, "invalid param: %d", msg->param);
+			if (sns.verbosity >= 3) fprintf(stdout, "default: [");
 			r = NTCAN_SUCCESS; 
 		} break;
 	}
 
 	// If there were not any errors, update the state; otherwise, give an error statement.
 	// NOTE: We reuse the position acknowledgement to save some work in updating
-	bool success = somatic_d_check(&cx->d, SOMATIC__EVENT__PRIORITIES__CRIT, 
-		SOMATIC__EVENT__CODES__COMM_DEV, NTCAN_SUCCESS == r, "execute_and_update_state", 
-		"ntcan result: %s", canResultString(r));
-	if(success) update_state(cx, got_ack ? ack_vals : NULL);
+	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "execute_and_update_state: ntcan result: %s", 
+		canResultString(r));
+	if(r == NTCAN_SUCCESS) update_state(cx, got_ack ? ack_vals : NULL);
 	else pcio_group_dump_error(g);
 
 	// Print the message contents
-	if (somatic_opt_verbosity >= 3) {
+	if (sns.verbosity >= 3) {
 		size_t i;
 		for (i = 0; i < msg->values->n_data; ++i) {
 			if (i < msg->values->n_data -1 ) fprintf(stdout, "%lf::", msg->values->data[i]);
@@ -752,8 +761,9 @@ static void update_state(pciod_t *cx, double *pos_acks) {
 
 		// Get the positions
 		r = pcio_group_getd( &cx->group, PCIO_ACT_FPOS, pos_vals, cx->n );
-		if(somatic_d_check( &cx->d, SOMATIC__EVENT__PRIORITIES__CRIT, SOMATIC__EVENT__CODES__COMM_DEV,
-				 NTCAN_SUCCESS == r, "update_state-pos", "ntcan result: %s", canResultString(r))) 
+		SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-pos: ntcan result: %s", 
+			canResultString(r));
+		if(r == NTCAN_SUCCESS)
 			msg->position->data = pos_vals;
 
 		// If the get is unsuccessfull, set the data to zero and update the status
@@ -768,8 +778,9 @@ static void update_state(pciod_t *cx, double *pos_acks) {
 	// Set velocities into the msg; if failed set the data to zero and update status
 	double vel_vals[cx->n];
 	r = pcio_group_getd( &cx->group, PCIO_ACT_FVEL, vel_vals, cx->n );
-	if(somatic_d_check( &cx->d, SOMATIC__EVENT__PRIORITIES__CRIT, SOMATIC__EVENT__CODES__COMM_DEV,
-			NTCAN_SUCCESS == r, "update_state-vel", canResultString(r)) ) {
+	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-vel: ntcan result: %s", 
+		canResultString(r));
+	if(r == NTCAN_SUCCESS)
 		msg->velocity->data = vel_vals;
 	} else {
 		msg->velocity->data = NULL;
@@ -779,8 +790,9 @@ static void update_state(pciod_t *cx, double *pos_acks) {
 	// Set currents into the msg; if failed set the data to zero and update status
 	double cur_vals[cx->n];
 	r = pcio_group_getd( &cx->group, PCIO_ACT_FPSEUDOCURRENT, cur_vals, cx->n );
-	if(somatic_d_check( &cx->d, SOMATIC__EVENT__PRIORITIES__CRIT, SOMATIC__EVENT__CODES__COMM_DEV,
-			NTCAN_SUCCESS == r, "update_state-cur", canResultString(r)) ) {
+	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-cur: ntcan result: %s", 
+		canResultString(r));
+	if(r == NTCAN_SUCCESS)
 	  msg->current->data = cur_vals;
 	} else {
 	  msg->current->data = NULL;
@@ -792,8 +804,9 @@ static void update_state(pciod_t *cx, double *pos_acks) {
 	msg->has_status = 1;
 	msg->status = SOMATIC__MOTOR_STATUS__MOTOR_OK;
 	r = pcio_group_getu32( &cx->group, PCIO_PARAM_ERROR, status_vals, cx->n);
-	if(somatic_d_check( &cx->d, SOMATIC__EVENT__PRIORITIES__CRIT, SOMATIC__EVENT__CODES__COMM_DEV,
-			NTCAN_SUCCESS == r, "update_state-status", canResultString(r))) {
+	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-status: ntcan result: %s", 
+		canResultString(r));
+	if(r == NTCAN_SUCCESS) {
 		for(size_t j=0; j < cx->n; j++) {
 			if(status_vals[j] & PCIO_STATE_ERROR) {
 				msg->status |= SOMATIC__MOTOR_STATUS__MOTOR_FAIL| SOMATIC__MOTOR_STATUS__MOTOR_HW_FAIL;
@@ -804,10 +817,10 @@ static void update_state(pciod_t *cx, double *pos_acks) {
 
 	// Package a state message for the ack returned, and send to state channel
 	r = SOMATIC_PACK_SEND( &cx->state_chan, somatic__motor_state, msg );
+  r = ach_put( &cx->state_chan, cx->msg_state, sns_msg_motor_state_size(cx->msg_state));
 
 	/// check message transmission
-	somatic_d_check( &cx->d, SOMATIC__EVENT__PRIORITIES__CRIT,
-					 SOMATIC__EVENT__CODES__COMM_FAILED_TRANSPORT, ACH_OK == r, "update_state",
-					 "ach result: %s", ach_result_to_string(r) );
+	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state: ntcan result: %s", 
+		canResultString(r));
 }
 /* ******************************************************************************************** */
