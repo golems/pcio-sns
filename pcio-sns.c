@@ -46,21 +46,21 @@
  */
 
 #include <argp.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdarg.h>
-#include <stdint.h>
-
-#include <amino.h>
+//#include <stdlib.h>
+//#include <stdio.h>
+//#include <string.h>
+//#include <stdarg.h>
+//#include <stdint.h>
+//
+//#include <amino.h>
 #include <ntcan.h>
 #include <ntcanopen.h>
-#include <ach.h>
-
+//
 #include <sns.h>
+#include <ach.h>
+//#include <sns/msg.h>
 
 #include "pcio.h"
-#include "pciod.h"
 
 
 /* ******************************************************************************************** */
@@ -91,18 +91,20 @@ typedef struct pciod_arg_bus {
 #define PCIOD_STATE_CHANNEL_NAME "pciod-state"
 
 typedef struct {
-    somatic_d_t d;
-    somatic_d_opts_t d_opts;
+    // somatic_d_t d;
+    // somatic_d_opts_t d_opts;
     size_t n; // module count
     ach_channel_t cmd_chan;
     ach_channel_t state_chan;
     pcio_group_t group;
-    Somatic__MotorState state_msg;
-    struct {
-        Somatic__Vector position;
-        Somatic__Vector velocity;
-        Somatic__Vector current;
-    } state_msg_fields;
+		struct sns_msg_motor_state* state_msg;
+		struct sns_msg_motor_ref* ref_msg;
+    // Somatic__MotorState state_msg;
+    // struct {
+    //     Somatic__Vector position;
+    //     Somatic__Vector velocity;
+    //     Somatic__Vector current;
+    // } state_msg_fields;
 } pciod_t;
 
 /* ******************************************************************************************** */
@@ -254,7 +256,7 @@ static int parse_opt(int key, char *arg, struct argp_state *state) {
 		case 'R': opt_reset = 1; break;
 		case 'L': opt_list = 1; break;
 		case 'H': opt_home = 1; break;
-		case 'v': sns.verbosity ++; break;
+		case 'v': sns_cx.verbosity ++; break;
 		case 'f': opt_frequency = parsef(); break;
 		case ARG_KEY_DISABLE_FULL_CUR: opt_full_cur = 0; break;
 		case ARG_KEY_ENABLE_FULL_CUR: opt_full_cur = 1; break;
@@ -274,7 +276,7 @@ static struct argp argp = {options, parse_opt, NULL, doc, NULL, NULL, NULL };
 
 /* ******************************************************************************************** */
 int build_pcio_group(pcio_group_t *group);
-int execute_and_update_state(pciod_t *cx, Somatic__MotorCmd *msg );
+int execute_and_update_state(pciod_t *cx);
 static void update_state(pciod_t *cx, double *pos_acks);
 
 /* ******************************************************************************************** */
@@ -288,31 +290,8 @@ static void init_group( pciod_t *cx ) {
 /* ******************************************************************************************** */
 /// Sets up the message we will be sending to the motor group
 void setupMessage (pciod_t* cx) {
-
-	// Initialize the message and set status
-	somatic__motor_state__init(&cx->state_msg);
-	cx->state_msg.has_status = 1;
-	cx->state_msg.status = SOMATIC__MOTOR_STATUS__MOTOR_OK;
-
-	// Set the addresses (?)
-	cx->state_msg.position = &cx->state_msg_fields.position;
-	cx->state_msg.velocity = &cx->state_msg_fields.velocity;
-	cx->state_msg.current = &cx->state_msg_fields.current;
-
-	// Initialize each of the field vectors
-	somatic__vector__init(cx->state_msg.position);
-	somatic__vector__init(cx->state_msg.velocity);
-	somatic__vector__init(cx->state_msg.current);
-
-	// Set the number of variables
-	cx->state_msg.position->n_data = cx->n;
-	cx->state_msg.velocity->n_data = cx->n;
-	cx->state_msg.current->n_data = cx->n;
-
-	// Set the message type
-	cx->state_msg.meta = somatic_metadata_alloc();
-	cx->state_msg.meta->type = SOMATIC__MSG_TYPE__MOTOR_STATE;
-	cx->state_msg.meta->has_type = 1;
+	cx->state_msg = sns_msg_motor_state_heap_alloc(cx->n);
+  cx->ref_msg = sns_msg_motor_ref_heap_alloc (cx->n);
 }
 
 /* ******************************************************************************************** */
@@ -320,15 +299,15 @@ void setupMessage (pciod_t* cx) {
 static void init( pciod_t *cx ) {
 
 	// Initialize the daemon
-	sns.init();
+	sns_init();
 
 	// Initialize the group and home it if necessary
 	init_group(cx);
 	if (opt_home) pcio_group_home(&cx->group);
 
 	/// Initialize the state and command ach channels 
-	sns_open_chan (&cx->cmd_chan, opt_cmd_chan, NULL);
-	sns_open_chan (&cx->state_chan, opt_state_chan, NULL);
+	sns_chan_open (&cx->cmd_chan, opt_cmd_chan, NULL);
+	sns_chan_open (&cx->state_chan, opt_state_chan, NULL);
 
 	// Get the group size
 	cx->n = pcio_group_size(&cx->group);
@@ -346,6 +325,7 @@ static void init( pciod_t *cx ) {
 }
 
 /* ******************************************************************************************** */
+/// READ FROM COMMAND CHANNEL AND CALL EXECUTE IF MESSAGE EXISTS AND IS WELL-FORMED
 static void update( pciod_t *cx ) {
 
 	// Compute the absolute time when receive should give up waiting. Note that we need to use 
@@ -354,40 +334,41 @@ static void update( pciod_t *cx ) {
 	clock_gettime( CLOCK_MONOTONIC, &currTime);
 	struct timespec abstime = aa_tm_add(aa_tm_sec2timespec(opt_period_sec), currTime);
 
-	// Read current state from state channel
-	int r;
-	Somatic__MotorCmd *cmd = SOMATIC_D_GET( &r, somatic__motor_cmd, &cx->d, &cx->cmd_chan, &abstime, 
-		ACH_O_WAIT | ACH_O_LAST); 
+	// Read current reference from command channel
+  const size_t expected_size = sns_msg_motor_ref_size_n(cx->n);
+  size_t frame_size = 0;
+  ach_status_t r = ach_get(&cx->cmd_chan, cx->ref_msg, expected_size,
+                              &frame_size, &abstime, ACH_O_WAIT | ACH_O_LAST);
 
 	// Check message reception
-	bool good = (((ACH_OK == r || ACH_MISSED_FRAME == r) && cmd) || (ACH_TIMEOUT == r));
-	SNS_CHECK(good, LOG_WARNING, "pciod-update: ach result: %s", canResultString(r));
+	int good = (((ACH_OK == r || ACH_MISSED_FRAME == r) && cx->ref_msg) 
+						 || (ACH_TIMEOUT == r));
+	SNS_CHECK(good, LOG_WARNING, 0, "pciod-update: ach result: %s", canResultString(r));
 
 	// If the message has timed out, request an update
 	if (r == ACH_TIMEOUT) update_state(cx, NULL);
 
 	// Validate, execute and update the message
-	else if((ACH_OK == r || ACH_MISSED_FRAME == r) && cmd) {
+	else if((ACH_OK == r || ACH_MISSED_FRAME == r) && cx->ref_msg) {
 
 		// Check if the message has one of the expected parameters
-		int goodParam = cmd->has_param && (SOMATIC__MOTOR_PARAM__MOTOR_POSITION == cmd->param ||
-				 SOMATIC__MOTOR_PARAM__MOTOR_VELOCITY == cmd->param ||
-				 SOMATIC__MOTOR_PARAM__MOTOR_CURRENT == cmd->param ||
-				 SOMATIC__MOTOR_PARAM__MOTOR_HALT == cmd->param ||
-				 SOMATIC__MOTOR_PARAM__MOTOR_RESET == cmd->param);
+		int goodParam = (SNS_MOTOR_MODE_POS == cx->ref_msg->mode ||
+				 SNS_MOTOR_MODE_VEL == cx->ref_msg->mode ||
+				 SNS_MOTOR_MODE_CUR == cx->ref_msg->mode ||
+				 SNS_MOTOR_MODE_HALT == cx->ref_msg->mode ||
+				 SNS_MOTOR_MODE_RESET == cx->ref_msg->mode);
 		
 		// Check if the command has the right number of parameters if pos, vel or current
-		int goodValues = ((cmd->values && cmd->values->n_data == cx->n) ||
-				SOMATIC__MOTOR_PARAM__MOTOR_HALT == cmd->param ||
-				SOMATIC__MOTOR_PARAM__MOTOR_RESET == cmd->param);
+		int goodValues = ((cx->ref_msg->u && cx->ref_msg->header.n == cx->n) ||
+				SNS_MOTOR_MODE_HALT == cx->ref_msg->mode ||
+				SNS_MOTOR_MODE_RESET == cx->ref_msg->mode);
 
 		// Use somatic interface to combine the finalize the checks in case there is an error
-		int somGoodParam = SNS_REQUIRE(goodParam, "invalid motor param, set: %d, val: %d", cmd->has_param, cmd->param);
-		int somGoodValues = SNS_REQUIRE(goodValues, "wrong motor count: %d, wanted %d", cmd->values->n_data, cx->n);
+		SNS_REQUIRE(goodParam, "invalid motor param, val: %d", cx->ref_msg->mode);
+		SNS_REQUIRE(goodValues, "wrong motor count: %d, wanted %d", cx->ref_msg->header.n, cx->n);
 
-		// If both good parameter and values, execute the command; otherwise just update the state
-		if(somGoodParam && somGoodValues) execute_and_update_state(cx, cmd);
-		else update_state(cx, NULL);
+		// Execute the command
+		execute_and_update_state(cx);
 	}
 }
 
@@ -478,7 +459,7 @@ static void set( pciod_t *cx) {
 	else assert(0);
 
 	// If in verbose mode, query it to show that the set action was successful
-	if( sns.verbosity ) {
+	if( sns_cx.verbosity ) {
 		opt_query = opt_set;
 		query(cx);
 	}
@@ -533,16 +514,13 @@ static void set_config( pciod_t *cx) {
 static void run( pciod_t *cx) {
 
 	// Send a "running" notice on the event channel
-	sns.start();
+	sns_start();
 
 	// Keep updating
 	while (!sns_cx.shutdown) {
 		update(cx);
-		aa_mem_region_release( &cx->d.memreg );
+		aa_mem_region_local_release();
 	}
-
-	// Send a "stopping" notice on the event channel
-	sns.stop();
 }
 
 /* ******************************************************************************************** */
@@ -555,8 +533,6 @@ int main(int argc, char *argv[]) {
 	// Set the options for the daemon
 	static pciod_t cx;
 	memset(&cx,0,sizeof(cx));
-	cx.d_opts.sched_rt = SOMATIC_D_SCHED_MOTOR;
-	cx.d_opts.ident = "pciod";
 
 	// Parse the arguments
 	argp_parse(&argp, argc, argv, 0, NULL, &cx);
@@ -673,71 +649,73 @@ int build_pcio_group(pcio_group_t *g) {
 /* ******************************************************************************************** */
 // Generate the pcio calls requested by the specified motor command message, and update the state 
 // with the module acknowledgments. Note: msg size should match group size.
-int execute_and_update_state(pciod_t *cx, Somatic__MotorCmd *msg ) {
+// HANDLE REF, SEND TO HARDWARE
+int execute_and_update_state(pciod_t *cx) {
 
 	// Switch on the command flag type and execute the command
-	double ack_vals[msg->values->n_data];
+	double ack_vals[cx->ref_msg->header.n];
 	int got_ack = 0;
 	int r;
 	pcio_group_t *g = &cx->group;
-	switch (msg->param) {
+	switch (cx->ref_msg->mode) {
 
 		// Set the current values
-		case SOMATIC__MOTOR_PARAM__MOTOR_CURRENT: {
-			r = pcio_group_cmd_ack(g, ack_vals, msg->values->n_data, PCIO_FCUR_ACK, msg->values->data);
-			if(sns.verbosity >= 3) fprintf(stdout, "Setting motor currents: [");
+		case SNS_MOTOR_MODE_CUR: {
+			double data [cx->n];
+			r = pcio_group_cmd_ack(g, ack_vals, cx->ref_msg->header.n, PCIO_FCUR_ACK, cx->ref_msg->u);
+			if(sns_cx.verbosity >= 3) fprintf(stdout, "Setting motor currents: [");
 			got_ack = 1;
 		} break;
 
 		// Set the velocity values after limiting them using the expected time period (?)
-		case SOMATIC__MOTOR_PARAM__MOTOR_VELOCITY: {
-			pcio_group_limit_velocity(g, msg->values->data, msg->values->n_data, opt_period_sec);
-			r = pcio_group_cmd_ack(g, ack_vals, msg->values->n_data, PCIO_FVEL_ACK, msg->values->data);
+		case SNS_MOTOR_MODE_VEL: {
+			pcio_group_limit_velocity(g, cx->ref_msg->u, cx->ref_msg->header.n, opt_period_sec);
+			r = pcio_group_cmd_ack(g, ack_vals, cx->ref_msg->header.n, PCIO_FVEL_ACK, cx->ref_msg->u);
 			got_ack = 1;
-			if (sns.verbosity >= 3) fprintf(stdout, "Setting motor velocities: [");
+			if (sns_cx.verbosity >= 3) fprintf(stdout, "Setting motor velocities: [");
 		} break;
 
 		// Set the motor positions after limiting them
-		case SOMATIC__MOTOR_PARAM__MOTOR_POSITION: {
-			pcio_group_limit_position( g, msg->values->data, msg->values->n_data );
-			r = pcio_group_setpos_ack( g, msg->values->data, msg->values->n_data, 0.5, 4.0, ack_vals);
+		case SNS_MOTOR_MODE_POS: {
+			pcio_group_limit_position( g, cx->ref_msg->u, cx->ref_msg->header.n);
+			r = pcio_group_setpos_ack( g, cx->ref_msg->u, cx->ref_msg->header.n, 0.5, 4.0, ack_vals);
 			got_ack = 1;
-			if (sns.verbosity >= 3) fprintf(stdout, "Setting motor positions: [");
+			if (sns_cx.verbosity >= 3) fprintf(stdout, "Setting motor positions: [");
 		} break;
 
 		// Send a halt message
-		case SOMATIC__MOTOR_PARAM__MOTOR_HALT: {
+		case SNS_MOTOR_MODE_HALT: {
 			r = pcio_group_halt(g);
-			if (sns.verbosity >= 3) fprintf(stdout, "Halting motor: [");
+			if (sns_cx.verbosity >= 3) fprintf(stdout, "Halting motor: [");
 		} break;
 
 		// Send a reset message
-		case SOMATIC__MOTOR_PARAM__MOTOR_RESET: {
+		case SNS_MOTOR_MODE_RESET: {
 			r = pcio_group_reset(g);
-			if (sns.verbosity >= 3) fprintf(stdout, "Resetting motor: [");
+			if (sns_cx.verbosity >= 3) fprintf(stdout, "Resetting motor: [");
 		} break;
 
 		// Should not reach here - if does, set success to attempt to continue
 		default: {
-			SNS_REQUIRE(false, "invalid param: %d", msg->param);
-			if (sns.verbosity >= 3) fprintf(stdout, "default: [");
+			SNS_REQUIRE(0, "invalid param: %d", cx->ref_msg->mode);
+			if (sns_cx.verbosity >= 3) fprintf(stdout, "default: [");
 			r = NTCAN_SUCCESS; 
 		} break;
 	}
 
 	// If there were not any errors, update the state; otherwise, give an error statement.
 	// NOTE: We reuse the position acknowledgement to save some work in updating
-	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "execute_and_update_state: ntcan result: %s", 
+	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, 0, "execute_and_update_state: ntcan result: %s", 
 		canResultString(r));
 	if(r == NTCAN_SUCCESS) update_state(cx, got_ack ? ack_vals : NULL);
 	else pcio_group_dump_error(g);
 
 	// Print the message contents
-	if (sns.verbosity >= 3) {
+	if (sns_cx.verbosity >= 3) {
 		size_t i;
-		for (i = 0; i < msg->values->n_data; ++i) {
-			if (i < msg->values->n_data -1 ) fprintf(stdout, "%lf::", msg->values->data[i]);
-			else fprintf(stdout, "%lf]\n", msg->values->data[i]);
+		for (i = 0; i < cx->ref_msg->header.n; ++i) {
+			if (i < cx->ref_msg->header.n-1 ) fprintf(stdout, "%lf::", cx->ref_msg->u[i]);
+			else fprintf(stdout, "%lf]\n", cx->ref_msg->u[i]);
 		}
 	}
 
@@ -748,11 +726,11 @@ int execute_and_update_state(pciod_t *cx, Somatic__MotorCmd *msg ) {
 /// Issues a request for position and velocity of the modules, and posts on state channel. 
 /// If pos_acks is NULL, update_state will query both position and velocity from the network  If 
 /// an array is provided, it will pull the position values from this array to save an extra call.
+/// SENDS STATE_MSG TO THE ACK 
 static void update_state(pciod_t *cx, double *pos_acks) {
 
 	// Set the status of the message
-	Somatic__MotorState* msg = &(cx->state_msg);
-	msg->status = SOMATIC__MOTOR_STATUS__MOTOR_OK;
+	struct sns_msg_motor_state* msg = &(cx->state_msg);
 
 	// Set positions into local variable if they are not already provided and place in state_msg
 	int r;
@@ -761,66 +739,61 @@ static void update_state(pciod_t *cx, double *pos_acks) {
 
 		// Get the positions
 		r = pcio_group_getd( &cx->group, PCIO_ACT_FPOS, pos_vals, cx->n );
-		SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-pos: ntcan result: %s", 
+		SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, 0, "update_state-pos: ntcan result: %s", 
 			canResultString(r));
-		if(r == NTCAN_SUCCESS)
-			msg->position->data = pos_vals;
-
-		// If the get is unsuccessfull, set the data to zero and update the status
-		else {
-			msg->position->data = NULL;
-			msg->status |= SOMATIC__MOTOR_STATUS__MOTOR_FAIL | SOMATIC__MOTOR_STATUS__MOTOR_COMM_FAIL;
-		}
+		if(r == NTCAN_SUCCESS) 
+			for(size_t i = 0; i < cx->n; i++)
+				msg->X[i].pos = pos_vals[i];
 	} else {
-		msg->position->data = pos_acks;
+		for(size_t i = 0; i < cx->n; i++) msg->X[i].pos = pos_acks[i];
 	}
 
 	// Set velocities into the msg; if failed set the data to zero and update status
 	double vel_vals[cx->n];
 	r = pcio_group_getd( &cx->group, PCIO_ACT_FVEL, vel_vals, cx->n );
-	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-vel: ntcan result: %s", 
+	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, 0, "update_state-vel: ntcan result: %s", 
 		canResultString(r));
-	if(r == NTCAN_SUCCESS)
-		msg->velocity->data = vel_vals;
-	} else {
-		msg->velocity->data = NULL;
-		msg->status |= SOMATIC__MOTOR_STATUS__MOTOR_FAIL | SOMATIC__MOTOR_STATUS__MOTOR_COMM_FAIL;
-	}
+	if(r == NTCAN_SUCCESS) 
+		for(size_t i = 0; i < cx->n; i++) msg->X[i].vel = vel_vals[i];
+
+	// Set sequence number and time
+  cx->state_msg->header.seq++;
+	// sns_msg_set_time( &cx->msg_state->header, &cx->now, (int64_t)(opt_timeout_sec*1e9*2) );
 
 	// Set currents into the msg; if failed set the data to zero and update status
-	double cur_vals[cx->n];
-	r = pcio_group_getd( &cx->group, PCIO_ACT_FPSEUDOCURRENT, cur_vals, cx->n );
-	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-cur: ntcan result: %s", 
-		canResultString(r));
-	if(r == NTCAN_SUCCESS)
-	  msg->current->data = cur_vals;
-	} else {
-	  msg->current->data = NULL;
-	  msg->status |= SOMATIC__MOTOR_STATUS__MOTOR_FAIL | SOMATIC__MOTOR_STATUS__MOTOR_COMM_FAIL;
-	}
+//	double cur_vals[cx->n];
+//	r = pcio_group_getd( &cx->group, PCIO_ACT_FPSEUDOCURRENT, cur_vals, cx->n );
+//	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-cur: ntcan result: %s", 
+//		canResultString(r));
+//	if(r == NTCAN_SUCCESS)
+//	  msg->current->data = cur_vals;
+//	} else {
+//	  msg->current->data = NULL;
+//	  msg->status |= SOMATIC__MOTOR_STATUS__MOTOR_FAIL | SOMATIC__MOTOR_STATUS__MOTOR_COMM_FAIL;
+//	}
 
 	// Get status words too and check if any of them have an error. TODO: If failed to get, error.
-	uint32_t status_vals[cx->n];
-	msg->has_status = 1;
-	msg->status = SOMATIC__MOTOR_STATUS__MOTOR_OK;
-	r = pcio_group_getu32( &cx->group, PCIO_PARAM_ERROR, status_vals, cx->n);
-	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-status: ntcan result: %s", 
-		canResultString(r));
-	if(r == NTCAN_SUCCESS) {
-		for(size_t j=0; j < cx->n; j++) {
-			if(status_vals[j] & PCIO_STATE_ERROR) {
-				msg->status |= SOMATIC__MOTOR_STATUS__MOTOR_FAIL| SOMATIC__MOTOR_STATUS__MOTOR_HW_FAIL;
-				break;
-			}
-		}
-	}
+	//uint32_t status_vals[cx->n];
+	//msg->has_status = 1;
+	//msg->status = SOMATIC__MOTOR_STATUS__MOTOR_OK;
+	//r = pcio_group_getu32( &cx->group, PCIO_PARAM_ERROR, status_vals, cx->n);
+	//SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state-status: ntcan result: %s", 
+	//	canResultString(r));
+	//if(r == NTCAN_SUCCESS) {
+	//	for(size_t j=0; j < cx->n; j++) {
+	//		if(status_vals[j] & PCIO_STATE_ERROR) {
+	//			msg->status |= SOMATIC__MOTOR_STATUS__MOTOR_FAIL| SOMATIC__MOTOR_STATUS__MOTOR_HW_FAIL;
+	//			break;
+	//		}
+	//	}
+	//}
 
 	// Package a state message for the ack returned, and send to state channel
-	r = SOMATIC_PACK_SEND( &cx->state_chan, somatic__motor_state, msg );
-  r = ach_put( &cx->state_chan, cx->msg_state, sns_msg_motor_state_size(cx->msg_state));
+	// r = SOMATIC_PACK_SEND( &cx->state_chan, somatic__motor_state, msg );
+  r = ach_put( &cx->state_chan, cx->state_msg, sns_msg_motor_state_size(cx->state_msg));
 
 	/// check message transmission
-	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, "update_state: ntcan result: %s", 
+	SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, 0, "update_state: ntcan result: %s", 
 		canResultString(r));
 }
 /* ******************************************************************************************** */
