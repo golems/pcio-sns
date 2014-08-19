@@ -730,7 +730,7 @@ int execute_and_update_state(pciod_t *cx) {
 static void update_state(pciod_t *cx, double *pos_acks) {
 
 	// Set the status of the message
-	struct sns_msg_motor_state* msg = &(cx->state_msg);
+	struct sns_msg_motor_state* msg = cx->state_msg;
 
 	// Set positions into local variable if they are not already provided and place in state_msg
 	int r;
@@ -742,8 +742,7 @@ static void update_state(pciod_t *cx, double *pos_acks) {
 		SNS_CHECK(r == NTCAN_SUCCESS, LOG_WARNING, 0, "update_state-pos: ntcan result: %s", 
 			canResultString(r));
 		if(r == NTCAN_SUCCESS) 
-			for(size_t i = 0; i < cx->n; i++)
-				msg->X[i].pos = pos_vals[i];
+			for(size_t i = 0; i < cx->n; i++) msg->X[i].pos = pos_vals[i];
 	} else {
 		for(size_t i = 0; i < cx->n; i++) msg->X[i].pos = pos_acks[i];
 	}
@@ -755,6 +754,7 @@ static void update_state(pciod_t *cx, double *pos_acks) {
 		canResultString(r));
 	if(r == NTCAN_SUCCESS) 
 		for(size_t i = 0; i < cx->n; i++) msg->X[i].vel = vel_vals[i];
+
 
 	// Set sequence number and time
   cx->state_msg->header.seq++;
@@ -787,6 +787,15 @@ static void update_state(pciod_t *cx, double *pos_acks) {
 	//		}
 	//	}
 	//}
+
+	// Print the message contents
+	if (SNS_LOG_PRIORITY(LOG_DEBUG)) {
+		size_t i;
+		printf("\nseq %d: \n", cx->state_msg->header.seq);
+		for (i = 0; i < cx->state_msg->header.n; ++i) {
+			printf("%lf, %lf\n", cx->state_msg->X[i].pos, cx->state_msg->X[i].vel); 
+		}
+	}
 
 	// Package a state message for the ack returned, and send to state channel
 	// r = SOMATIC_PACK_SEND( &cx->state_chan, somatic__motor_state, msg );
