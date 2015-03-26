@@ -20,13 +20,13 @@ link_libraries(ach sns ntcan ntcanopen amino)
 
 # Add the executables
 include_directories(include)
-add_executable(pciod pciod.c pcio.c code.c)
+#add_executable(pciod pciod.c pcio.c code.c)
 add_executable(pcio-sns pcio-sns.c pcio.c code.c)
-add_executable(pcio_util pcio_util.c pcio.c code.c)
-add_executable(query tests/query.c pcio.c code.c)
+#add_executable(pcio_util pcio_util.c pcio.c code.c)
+#add_executable(query tests/query.c pcio.c code.c)
 
 # Install it
-install(TARGETS pciod pcio_util DESTINATION /usr/local/bin)
+#install(TARGETS pciod pcio_util DESTINATION /usr/local/bin)
 
 ###############
 # Package Installer

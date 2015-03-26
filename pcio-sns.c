@@ -324,6 +324,39 @@ static void init( pciod_t *cx ) {
 	aa_hard_assert(r == NTCAN_SUCCESS, "Failed to set full current\n");
 }
 
+
+/**
+ * @function 
+ * @brief Set zero velocity command when message is expired
+ */
+void zero_vel( pciod_t *_cx ) {
+   size_t n = _cx->n;
+   double ack_vals[n];
+   double u[n]; for( size_t i = 0; i < n; ++i ) { u[i] = 0; }
+   int got_ack = 0;
+   int r;
+   pcio_group_t *g = &_cx->group;
+
+   
+   // If velocity is already in zero, leave it, otherwise send the command
+   // (no need to constantly send messages if you can avoid it)
+   int doHalt = 0;
+   for( size_t i = 0; i < n; ++i ) {
+     if( _cx->state_msg->X[i].vel != 0 ) { doHalt = 1; break; }
+   }
+
+   // Set velocity to zero
+   if( doHalt == 1 ) {
+  
+  // printf(" Actually halting - n: %d \n", n);
+   r = pcio_group_cmd_ack( g, ack_vals, n, PCIO_FVEL_ACK, u );
+    got_ack = 1;
+    if( sns_cx.verbosity >= 3 ) { fprintf( stdout, "Setting motor to halt (vel zero) :["); }
+    if( r != NTCAN_SUCCESS  ) { pcio_group_dump_error(g); }
+  }
+}
+
+
 /* ******************************************************************************************** */
 /// READ FROM COMMAND CHANNEL AND CALL EXECUTE IF MESSAGE EXISTS AND IS WELL-FORMED
 static void update( pciod_t *cx ) {
@@ -346,7 +379,23 @@ static void update( pciod_t *cx ) {
 	SNS_CHECK(good, LOG_WARNING, 0, "pciod-update: ach result: %s", canResultString(r));
 
 	// If the message has timed out, request an update
-	if (r == ACH_TIMEOUT) update_state(cx, NULL);
+	if (r == ACH_TIMEOUT) {
+
+     update_state(cx, NULL);
+
+  //*******************************
+  // Check if message is expired in TIMEOUT CASE (Similar to how it is done in can402)
+    if( sns_msg_is_expired(&cx->ref_msg->header, &abstime ) ) {
+
+       // Only if previous message was velocity (i.e. not to interrupt position)
+       if( cx->ref_msg != NULL ) {
+         if( cx->ref_msg->mode == SNS_MOTOR_MODE_VEL ) {
+       		zero_vel(cx);
+         }
+      }
+    }
+  }
+  //*******************************
 
 	// Validate, execute and update the message
 	else if((ACH_OK == r || ACH_MISSED_FRAME == r) && cx->ref_msg) {
