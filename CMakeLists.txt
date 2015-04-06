@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.6)
-project(pcio)
+project(pcio-sns)
 
 set(PCIO_MAJOR_VERSION "1")
 set(PCIO_MINOR_VERSION "0")
@@ -27,6 +27,7 @@ add_executable(pcio-sns pcio-sns.c pcio.c code.c)
 
 # Install it
 #install(TARGETS pciod pcio_util DESTINATION /usr/local/bin)
+install( TARGETS pcio-sns DESTINATION /home/ana/local/bin )
 
 ###############
 # Package Installer
