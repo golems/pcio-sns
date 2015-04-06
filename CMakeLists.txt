@@ -22,12 +22,13 @@ link_libraries(ach sns ntcan ntcanopen amino)
 include_directories(include)
 #add_executable(pciod pciod.c pcio.c code.c)
 add_executable(pcio-sns pcio-sns.c pcio.c code.c)
+set_target_properties( pcio-sns PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin )
 #add_executable(pcio_util pcio_util.c pcio.c code.c)
 #add_executable(query tests/query.c pcio.c code.c)
 
 # Install it
 #install(TARGETS pciod pcio_util DESTINATION /usr/local/bin)
-install( TARGETS pcio-sns DESTINATION /home/ana/local/bin )
+install( TARGETS pcio-sns DESTINATION $ENV{HOME}/local/bin )
 
 ###############
 # Package Installer
